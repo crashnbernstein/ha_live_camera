@@ -28,7 +28,7 @@ static const char *const TAG = "ha_live_camera";
 // Read chunk handed to the parser. Small on purpose: the parser is streaming,
 // so there is nothing to gain from large reads and everything to lose in
 // latency.
-static constexpr size_t READ_CHUNK = 4096;
+static constexpr size_t READ_CHUNK = 8192;
 
 // Reconnect backoff.
 static constexpr uint32_t RECONNECT_DELAY_MS = 1500;
@@ -126,12 +126,23 @@ void HaLiveCamera::setup() {
   }
 #endif
 
-  xTaskCreatePinnedToCore(&HaLiveCamera::task_trampoline_, "ha_live_cam", 6144, this, this->task_priority_,
-                          &this->task_, 0);
+  // Core 1, not core 0: ESPHome's main loop -- and therefore LVGL -- runs on
+  // core 0, and this task now does TLS decryption as well as feeding the JPEG
+  // decoder. Sharing a core with the UI is what makes the video stutter.
+  //
+  // 6 kB of stack was fine for plain HTTP but is marginal for an mbedTLS
+  // handshake, which wants closer to 8-12 kB on its own.
+  const uint32_t stack = this->url_is_https_() ? 14336 : 6144;
+  xTaskCreatePinnedToCore(&HaLiveCamera::task_trampoline_, "ha_live_cam", stack, this, this->task_priority_,
+                          &this->task_, 1);
   if (this->task_ == nullptr) {
     ESP_LOGE(TAG, "Failed to create network task");
     this->mark_failed();
   }
+}
+
+static uint32_t free_internal_kb() {
+  return static_cast<uint32_t>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024);
 }
 
 void HaLiveCamera::dump_config() {
@@ -211,11 +222,16 @@ void HaLiveCamera::loop() {
       d = px[npx - 1];
     }
     ESP_LOGD(TAG,
-             "diag lvgl=%d fb=%ux%u pub=%u dec=%u drop=%u skip=%u fps=%.1f data=%p px=%04x %04x %04x %04x",
+             "diag lvgl=%d fb=%ux%u pub=%u dec=%u drop=%u skip=%u fps=%.1f heap=%ukB stack=%u data=%p "
+             "px=%04x %04x %04x %04x",
              lvgl_built ? 1 : 0, (unsigned) this->width_, (unsigned) this->height_,
              (unsigned) this->published_count_,
              (unsigned) this->decoded_count_.load(std::memory_order_relaxed),
              (unsigned) this->dropped_frames(), (unsigned) this->skipped_frames_, this->measured_fps_,
+             (unsigned) free_internal_kb(),
+             // Bytes of task stack never used -- if this approaches 0 the TLS
+             // handshake is running out of room.
+             (unsigned) (this->task_ != nullptr ? uxTaskGetStackHighWaterMark(this->task_) : 0),
              (void *) this->data_start_, a, b, c, d);
 #ifdef USE_LVGL
     ESP_LOGD(TAG, "diag dsc data=%p w=%u h=%u stride=%u cf=%u", (void *) this->dsc_.data,
@@ -509,7 +525,9 @@ void HaLiveCamera::run_stream_(size_t index) {
   cfg.url = url.c_str();
   cfg.method = HTTP_METHOD_GET;
   cfg.timeout_ms = 5000;
-  cfg.buffer_size = 1024;
+  // TLS records are up to 16 kB; reading them 1 kB at a time costs a syscall
+  // and a memmove per slice for no benefit.
+  cfg.buffer_size = this->url_is_https_() ? 4096 : 1024;
   cfg.buffer_size_tx = 1024;
   cfg.disable_auto_redirect = false;
   cfg.keep_alive_enable = true;
