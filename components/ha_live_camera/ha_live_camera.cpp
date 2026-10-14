@@ -462,6 +462,7 @@ std::string HaLiveCamera::build_url_(const CameraEntry &c) const {
   url += c.camera_name;
   url += "?fps=";
   url += to_string(this->stream_fps_);
+  // un-comment this next line (bbox...) to view the debug stream from frigate
   url += "&bbox=1&motion=1&regions=1";
   url += "&height=";
   url += to_string(this->stream_height_);
