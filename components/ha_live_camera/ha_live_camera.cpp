@@ -460,8 +460,9 @@ std::string HaLiveCamera::build_url_(const CameraEntry &c) const {
   std::string url = this->base_url_();
   url += "/api/";
   url += c.camera_name;
-  url += "?bbox=1&motion=1&regions=1&fps=";
+  url += "?fps=";
   url += to_string(this->stream_fps_);
+  url += "&bbox=1&motion=1&regions=1";
   url += "&height=";
   url += to_string(this->stream_height_);
   return url;
